@@ -2,7 +2,7 @@ import sys
 from setuptools import setup, find_packages
 
 wargs = {}
-requires = []
+requires = ['apache-libcloud>=1.0.0-pre1']
 
 # python 2.7 hackery
 if sys.version_info <= (3, 0):
