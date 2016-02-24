@@ -19,3 +19,4 @@ build/
 .ipynb_checkpoints
 .cache/
 .eggs/
+nsx_config
