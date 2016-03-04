@@ -1,0 +1,122 @@
+#!/usr/bin/env python
+
+import sys
+import click
+from nsx.client import NSXClient
+import json
+import logging
+import requests
+import time
+import datetime
+import os
+from dimensiondata.dr.constants import (DIRECTORY,
+                                        BACKUP_DIRECTORY,
+                                        CURRENT_DIRECTORY,
+                                        LOG_DIRECTORY)
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+try:
+    import configparser
+except ImportError:
+    import ConfigParser as configparser
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+logging.basicConfig(filename='dd_nsx.log', level=logging.DEBUG)
+
+@click.group()
+@click.option('--debug', default=False)
+def nsx(debug):
+    pass
+
+@nsx.command()
+@click.option('--configFile', type=click.File('rb'), default='./nsx_config', help='The config file to use for credentials/endpoints')
+@click.option('--datacenter', required=True, help='The datacenter to dump the config for')
+@click.option('--cron', is_flag=True, default=False, help='Use this flag is running via cron')
+@click.option('--outFile', help='The nsx dump file')
+def dump_config(configfile, datacenter, cron, outfile):
+    if not outfile and not cron:
+        click.secho("One of --cron or --outFile must be present", fg='red', bold=True)
+        exit(1)
+    config = configparser.ConfigParser()
+    config.readfp(configfile)
+    datacenters = config.sections()
+    if datacenter not in datacenters:
+        click.secho("{} is not a valid datacenter in {}".format(data), fg='red', bold=True)
+        exit(1)
+
+    user = config.get(datacenter, 'user')
+    password = config.get(datacenter, 'password')
+    endpoint = config.get(datacenter, 'endpoint')
+    client = NSXClient(user, password, endpoint=endpoint)
+    dc_security_groups = {}
+    dc_security_groups[datacenter] = client.list_security_groups()
+    current_time = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d-%H:%M')
+    dc_security_groups['snapshot_time'] = current_time
+
+    if cron:
+        outfile = os.path.join(DIRECTORY, CURRENT_DIRECTORY, "LATEST-{}".format(datacenter))
+        if os.path.isfile(outfile):
+            with open(outfile) as movefile:
+                data = json.load(movefile)
+            file_timestamp = data['snapshot_time']
+            os.rename(outfile, os.path.join(DIRECTORY, BACKUP_DIRECTORY, "NSX_BACKUP_{}_{}".format(datacenter, file_timestamp)))
+    with open(outfile, 'w+') as nsx_dump:
+        nsx_dump.write(json.dumps(dc_security_groups, sort_keys=True, indent=4, separators=(',', ': ')))
+
+
+@nsx.command()
+@click.option('--datacenter', required=True, prompt='Datacenter to apply security groups for:', help='This is the datacenter to appy NSX security groups for')
+@click.option('--configFile', type=click.File('rb'), default='./nsx_config', help='The config file to use for credentials/endpoints')
+@click.option('--latest', default=False, is_flag=True)
+@click.option('--go', help='By default this is a dry run, these will actually do the puts', default=False, is_flag=True)
+@click.option('--nsxDumpFile', help="The nsx dump file to use")
+def apply_nsx_config(datacenter, configfile, latest, go, nsxdumpfile):
+    if not latest and not nsxdumpfile:
+        click.secho("One of --latest or --nsxDumpFile must be present", fg='red', bold=True)
+        exit(1)
+    config = configparser.ConfigParser()
+    config.readfp(configfile)
+    user = config.get(datacenter, 'user')
+    password = config.get(datacenter, 'password')
+    endpoint = config.get(datacenter, 'endpoint')
+    client = NSXClient(user, password, endpoint=endpoint)
+
+    if latest:
+        nsxdumpfile = os.path.join(DIRECTORY, CURRENT_DIRECTORY, "LATEST-{}".format(datacenter))
+
+    with open(nsxdumpfile) as f:
+        dc_security_groups = json.load(f)
+
+    if not dc_security_groups.has_key(datacenter):
+        click.secho("No dump found for datacenter {}".format(datacenter), fg='red', bold=True)
+        exit(1)
+    security_groups = dc_security_groups[datacenter]
+    if not go:
+        click.secho('This is a dryrun', fg='yellow')
+
+    for security_group in security_groups:
+        click.secho("Security group {}".format(security_group['objectId']))
+        if not security_group.has_key('member'):
+            click.secho("Security group has no members skipping...")
+            continue
+        if isinstance(security_group['member'], dict):
+            add_member(client, security_group['objectId'], security_group['member']['objectId'], go)
+        else:
+            for member in security_group['member']:
+                add_member(client, security_group['objectId'], member['objectId'], go)
+
+
+def add_member(client, group, member, go):
+    if not go:
+        click.secho("Would have made call for {} and {}".format(group, member), fg='green')
+    else:
+        try:
+            output = client.add_member_to_security_group(group, member)
+            click.secho("Successfully added: Group {} Member {}".format(group, member), fg='green')
+        except HTTPError:
+            click.secho("Skipping Group {} Member {} as it already exists")
+            pass
+
+
+if __name__ == '__main__':
+    nsx()
