@@ -40,10 +40,10 @@ class BaseNSXClient(object):
         log.debug(url)
 
         if rtype:
-            headers = {'Content-Type': "application/{}".format(rtype)}
+            headers = {'Content-Type': "application/{0}".format(rtype)}
 
         if self._dryrun:
-            return "{} {}".format(method, url)
+            return "{0} {1}".format(method, url)
         call = getattr(self.session, method)
         try:
             response = call(url,

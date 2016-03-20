@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+import click
+import collections
+from libcloud.compute.drivers.dimensiondata import DimensionDataNodeDriver
+from libcloud.loadbalancer.drivers.dimensiondata import DimensionDataLBDriver
+from libcloud.common.dimensiondata import DEFAULT_REGION
+
+
+CONTEXT_SETTINGS = dict(auto_envvar_prefix='DIDATA')
+
+
+class DiDataCLIClient(object):
+    def __init__(self):
+        self.verbose = False
+
+    def init_client(self, user, password, region):
+        self.node = DimensionDataNodeDriver(user, password, region=region)
+        self.loadbalancer = DimensionDataLBDriver(user, password, region=region)
+
+pass_client = click.make_pass_decorator(DiDataCLIClient, ensure=True)
+
+
+@click.group(context_settings=CONTEXT_SETTINGS)
+@click.option('--verbose', is_flag=True, default=False)
+@click.option('--user', prompt=True)
+@click.option('--password', prompt=True, hide_input=True)
+@click.option('--region', default=DEFAULT_REGION)
+@pass_client
+def compare(client, verbose, user, password, region):
+    client.init_client(user, password, region)
+    client.verbose = verbose
+
+
+@compare.command()
+@click.option('--dc', type=click.UNPROCESSED, required=True, help='The master datacenter to compare')
+@click.option('--secondaryDC', type=click.UNPROCESSED, required=True, help='The datacenter to compare to')
+@pass_client
+def servers_between_dcs(client, masterdc, drdc):
+    master_nodes = client.node.list_nodes(ex_location=masterdc)
+    dr_nodes = client.node.list_nodes(ex_location=drdc)
+
+    master_node_dict = convert_nodes(master_nodes)
+    dr_node_dict = convert_nodes(dr_nodes)
+    compare_nodes(master_node_dict, dr_node_dict, client.verbose)
+
+
+@compare.command()
+@pass_client
+def loadbalancers(client):
+    balancers = client.loadbalancer.list_balancers()
+    print("{0}".format(balancers))
+
+
+@compare.command()
+@click.option('--primaryNetDomain', type=click.UNPROCESSED, required=True, help='First Network Domain')
+@click.option('--primaryLocation', type=click.UNPROCESSED, help='First Network Domain')
+@click.option('--secondaryNetDomain', type=click.UNPROCESSED, required=True, help='Secondary Network Domain')
+@click.option('--secondaryLocation', type=click.UNPROCESSED, help='First Network Domain')
+@pass_client
+def firewall_rules_between_net_domains(client, primarynetdomain, primarylocation,
+                                       secondarynetdomain, secondarylocation):
+    net_domains = client.node.ex_list_network_domains(location=primarylocation)
+    filtered_net_domains = filter(lambda x: x.name == primarynetdomain, net_domains)
+    if len(filtered_net_domains) > 1:
+        click.secho("More than 1 domain found for primary network domain. "
+                    "Please specify --primaryLocation for further searching", fg='red', bold=True)
+        for domain in filtered_net_domains:
+            click.secho("Name: {0} Id: {1} Location: {2}".format(domain.name, domain.id,
+                                                                 domain.location.id), fg='red')
+        exit(1)
+    if not filtered_net_domains:
+        click.secho("No network domain found with name {0}".format(primarynetdomain))
+        exit(1)
+    net_domain_id = filtered_net_domains[0].id
+    net_domain_firewall_rules = client.node.ex_list_firewall_rules(net_domain_id)
+
+    secondary_net_domains = client.node.ex_list_network_domains(location=secondarylocation)
+    filtered_net_domains = filter(lambda x: x.name == secondarynetdomain, secondary_net_domains)
+    if len(filtered_net_domains) > 1:
+        click.secho("More than 1 domain found for secondary network domain. "
+                    "Please specify --secondaryLocation for further searching", fg='red', bold=True)
+        for domain in filtered_net_domains:
+            click.secho("Name: {0} Id: {1} Location: {2}".format(domain.name, domain.id,
+                                                                 domain.location.id), fg='red')
+        exit(1)
+    if not filtered_net_domains:
+        click.secho("No network domain found with name {0}".format(primarynetdomain))
+        exit(1)
+    net_domain_id = filtered_net_domains[0].id
+    secondary_net_domain_firewall_rules = client.node.ex_list_firewall_rules(net_domain_id)
+
+    net_domain_firewall_rules_dict = convert_firewall_rules(net_domain_firewall_rules)
+    secondary_net_domain_firewall_rules_dict = convert_firewall_rules(secondary_net_domain_firewall_rules)
+    compare_firewall_rules(net_domain_firewall_rules_dict, secondary_net_domain_firewall_rules_dict)
+
+
+def convert_firewall_rules(rules):
+    rules_dict = collections.OrderedDict()
+    for rule in rules:
+        rule_str = flatten_firewall_rule(rule)
+        rules_dict[rule_str] = rule
+    return rules_dict
+
+
+def flatten_firewall_rule(rule):
+    return "{0}-{1}-{2}-{3}-{4}-{5}-{6}-{7}-{8}-{9}-{10}-{11}-{12}-{13}-{14}".format(
+        rule.action, rule.ip_version, rule.protocol, rule.enabled, rule.status,
+        rule.source.any_ip, rule.source.ip_address, rule.source.ip_prefix_size,
+        rule.source.port_begin, rule.source.port_end,
+        rule.destination.any_ip, rule.destination.ip_address, rule.destination.ip_prefix_size,
+        rule.destination.port_begin, rule.destination.port_end
+    )
+
+
+def compare_firewall_rules(primary_rules, secondary_rules, verbose=False):
+    primary_rules_tuple = list(primary_rules.items())
+    secondary_rules_tuple = list(secondary_rules.items())
+
+    count = 0
+    for rule in primary_rules_tuple:
+        matched_rule = False
+        if count > len(secondary_rules_tuple) - 1:
+            # This can't possibly work, so move to handling
+            pass
+        elif rule[0] == secondary_rules_tuple[count][0]:
+            click.secho("Rule {0} matches between network domains".format(rule[0]), fg='green', bold=True)
+            matched_rule = True
+
+        if matched_rule is False:
+            if rule[0] in secondary_rules:
+                click.secho("Rule {0} is present but not in the same order"
+                            " as in the secondary network domain".format(rule[0]),
+                            fg='yellow', bold=True)
+            else:
+                click.secho("Could not find rule {0} from primary network domain"
+                            " on secondary network domain".format(rule[0]),
+                            fg='red', bold=True)
+        count = count + 1
+    for rule in secondary_rules:
+        if rule not in primary_rules:
+            click.secho("Extra rule {0} found in secondary network domain".format(rule), fg='red', bold=True)
+
+
+def compare_nodes(master, dr, verbose=False):
+    for key in master.keys():
+        ip_split = key.split('.')
+        ip_split[2] = str(int(ip_split[2]) + 16)
+        dr_key = '.'.join(ip_split)
+        if dr_key in dr:
+            print("Found a match Master: {} DR: {}".format(key, dr_key))
+            if node_specs_match(master[key], dr[dr_key], verbose):
+                click.secho("Node matches", fg='green')
+            else:
+                click.secho("Node {} with ip {} does not match {} with ip {}".format(
+                    master[key]['name'], key, dr[dr_key]['name'], key), fg='red')
+
+            click.secho("")
+        else:
+            pass
+
+
+def node_specs_match(n1, n2, verbose=False):
+    click.secho("Comparing node {} and {}".format(n1['name'], n2['name']))
+    match = True
+    for key in n1.keys():
+        if key is 'name':
+            continue
+        if n1[key] != n2[key]:
+            match = False
+            click.secho("{} does not match {} vs {}".format(key, n1[key], n2[key]), fg='red')
+        elif verbose:
+            click.secho("{} matches for node".format(key), fg='green')
+    return match
+
+
+def convert_nodes(node_list):
+    node_dict = {}
+    for node in node_list:
+        node_dict[node.private_ips[0]] = {'cpu_count': node.extra['cpu'].cpu_count,
+                                          'cpu_performance': node.extra['cpu'].performance,
+                                          'cpu_cores_per_socket': node.extra['cpu'].cores_per_socket,
+                                          'os_name': node.extra['OS_displayName'],
+                                          'os_type': node.extra['OS_type'],
+                                          'disks': convert_disks(node.extra['disks']),
+                                          'memory': node.extra['memoryMb'],
+                                          'name': node.name}
+    return node_dict
+
+
+def convert_disks(disks):
+    disk_dict = {}
+    for disk in disks:
+        disk_dict[disk.scsi_id] = {
+            'size_gb': disk.size_gb,
+            'speed': disk.speed
+        }
+
+    return disk_dict
+
+
+if __name__ == '__main__':
+    compare()
