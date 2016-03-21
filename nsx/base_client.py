@@ -1,11 +1,9 @@
 import logging
 import requests
 import xmltodict
-import json
 from requests.exceptions import RetryError
 from requests.packages.urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from six import string_types
 
 DEFAULT_ENDPOINT = 'https://172.17.76.199'
 
@@ -68,7 +66,7 @@ class BaseNSXClient(object):
         return self._call('put', url, payload=payload, rtype=rtype, parameters=parameters)
 
     def _get_security_groups(self):
-        path = [ 'services', 'securitygroup', 'scope', 'globalroot-0']
+        path = ['services', 'securitygroup', 'scope', 'globalroot-0']
         url = self._build_url(path)
         return self._get(url, rtype='xml')
 

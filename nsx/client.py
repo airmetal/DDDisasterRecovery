@@ -2,6 +2,7 @@ import logging
 from .base_client import BaseNSXClient
 log = logging.getLogger(__name__)
 
+
 class NSXClient(BaseNSXClient):
     def list_security_groups(self):
         groups = self._get_security_groups()
