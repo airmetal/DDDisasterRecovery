@@ -7,6 +7,7 @@ import requests
 import time
 import datetime
 import os
+from dimensiondata.dr.utils import get_vm_mapping_from_file
 from dimensiondata.dr.constants import (DIRECTORY,
                                         BACKUP_DIRECTORY,
                                         CURRENT_DIRECTORY)
@@ -44,7 +45,7 @@ pass_client = click.make_pass_decorator(NSXCLIClient, ensure=True)
 
 
 @click.group()
-@click.option('--verbose', default=False)
+@click.option('--verbose', is_flag=True, default=False)
 @click.option('--configFile', type=click.File('rb'), default='./nsx_config',
               help='The config file to use for credentials/endpoints')
 @pass_client
@@ -86,11 +87,12 @@ def dump_config(nsx, cron, outfile, datacenter):
 @click.option('--nsxDumpFile', help="The nsx dump file to use")
 @click.option('--datacenter', required=True, help='The datacenter to apply the config for')
 @pass_client
-def apply_nsx_config(nsx, latest, go, nsxdumpfile, datacenter):
+def apply_config(nsx, latest, go, nsxdumpfile, datacenter):
     if not latest and not nsxdumpfile:
         click.secho("One of --latest or --nsxDumpFile must be present", fg='red', bold=True)
         exit(1)
-
+    if not go:
+        click.secho("This is a dry-run, no actions will be taken", fg='yellow', bold=True)
     current_security_groups = nsx.client[datacenter].list_security_groups()
 
     if latest:
@@ -114,7 +116,8 @@ def apply_nsx_config(nsx, latest, go, nsxdumpfile, datacenter):
 
             security_groups = dc_security_groups[datacenter]
 
-            print("Checking differences in file {0}".format(nsx_file))
+            if nsx.verbose:
+                click.secho("Checking differences in file {0}".format(nsx_file))
             differences = compare_security_groups(security_groups, current_security_groups)
 
             if differences:
@@ -135,10 +138,92 @@ def apply_nsx_config(nsx, latest, go, nsxdumpfile, datacenter):
                 changed = True
                 break
 
-    if changed:
+    if changed and go:
         click.secho("Security Groups Applied", fg='green', bold=True)
     else:
         click.secho("No security groups changed", fg='red', bold=True)
+
+
+@nsx.command()
+@click.option('--sourceDC', required=True)
+@click.option('--destDC', required=True)
+@click.option('--vmFile', help="The vm file to use")
+@pass_client
+def compare_nsx_vms(nsx, sourcedc, destdc, vmfile):
+    vm_mapping = get_vm_mapping_from_file(vmfile)
+    source_security_groups = nsx.client[sourcedc].list_security_groups()
+    dest_security_groups = nsx.client[destdc].list_security_groups()
+
+    source_vm_to_security_group = vm_to_security_group_map(source_security_groups)
+    dest_vm_to_security_group = vm_to_security_group_map(dest_security_groups)
+
+    error = False
+    for source_vm in vm_mapping[sourcedc]:
+        if nsx.verbose:
+            click.secho("Attempting to find VM {0} in NSX Config for {1}".format(source_vm, sourcedc))
+        if source_vm not in source_vm_to_security_group:
+            error = True
+            click.secho("Failed to find VM {0} in DC {1} NSX Config".format(source_vm, sourcedc), fg='red')
+            continue
+        else:
+            security_group_name = source_vm_to_security_group[source_vm]
+            if nsx.verbose:
+                click.secho("Found VM {0} in Securitry Group {1}".format(source_vm, security_group_name))
+
+        dest_vm = vm_mapping[sourcedc][source_vm]['vm']
+        if nsx.verbose:
+            click.secho("VM {0} should be replicating to VM {1} in DC {2}".format(source_vm, dest_vm, destdc))
+        if dest_vm_to_security_group[dest_vm] != security_group_name:
+            error = True
+            click.secho("VM {0} is in SG {1} while VM {2} is in SG: {3}".format(
+                source_vm,
+                security_group_name,
+                dest_vm,
+                dest_vm_to_security_group[dest_vm]
+            ), fg='red')
+            click.secho("")
+            continue
+        else:
+            if nsx.verbose:
+                click.secho("Successfully found both {0} and {1} in SG {2}".format(source_vm,
+                                                                                   dest_vm,
+                                                                                   security_group_name),
+                            fg='green')
+                click.secho("")
+
+    if error:
+        click.secho("Failed to match up VMs to security groups", fg='red', bold=True)
+        exit(1)
+    else:
+        click.secho("All rules match!", fg='green', bold=True)
+
+
+def vm_to_security_group_map(security_groups):
+    data_dict = {}
+    for security_group in security_groups:
+        if 'member' not in security_group:
+            continue
+        if isinstance(security_group['member'], dict):
+            data_dict[fix_vm_name(security_group['member']['scope']['name'])] = fix_sg_name(security_group['name'])
+        else:
+            for member in security_group['member']:
+                data_dict[fix_vm_name(member['scope']['name'])] = fix_sg_name(security_group['name'])
+
+    return data_dict
+
+
+def fix_vm_name(vmname):
+    if vmname.startswith('.'):
+        vmname = vmname[1:]
+    if vmname.endswith('.recoverpoint'):
+        vmname = vmname[:-13]
+    return vmname.replace('-', '.')
+
+
+def fix_sg_name(security_group_name):
+    if security_group_name.endswith('-DR'):
+        security_group_name = security_group_name[:-3]
+    return security_group_name
 
 
 def compare_security_groups(sg1, sg2):

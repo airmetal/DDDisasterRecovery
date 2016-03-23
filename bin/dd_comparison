@@ -5,6 +5,8 @@ from libcloud.compute.drivers.dimensiondata import DimensionDataNodeDriver
 from libcloud.loadbalancer.drivers.dimensiondata import DimensionDataLBDriver
 from libcloud.common.dimensiondata import DEFAULT_REGION
 
+from dimensiondata.dr.utils import get_vm_mapping_from_file
+
 
 CONTEXT_SETTINGS = dict(auto_envvar_prefix='DIDATA')
 
@@ -32,23 +34,28 @@ def compare(client, verbose, user, password, region):
 
 
 @compare.command()
-@click.option('--dc', type=click.UNPROCESSED, required=True, help='The master datacenter to compare')
+@click.option('--primaryDC', type=click.UNPROCESSED, required=True, help='The master datacenter to compare')
 @click.option('--secondaryDC', type=click.UNPROCESSED, required=True, help='The datacenter to compare to')
+@click.option('--vmFile', required=True, help="The vm file to use")
 @pass_client
-def servers_between_dcs(client, masterdc, drdc):
-    master_nodes = client.node.list_nodes(ex_location=masterdc)
-    dr_nodes = client.node.list_nodes(ex_location=drdc)
+def servers_between_dcs(client, primarydc, secondarydc, vmfile):
+    vm_mapping = get_vm_mapping_from_file(vmfile)
+    primary_nodes = client.node.list_nodes(ex_location=primarydc)
+    secondary_nodes = client.node.list_nodes(ex_location=secondarydc)
 
-    master_node_dict = convert_nodes(master_nodes)
-    dr_node_dict = convert_nodes(dr_nodes)
-    compare_nodes(master_node_dict, dr_node_dict, client.verbose)
+    primary_node_dict = convert_nodes(primary_nodes)
+    secondary_node_dict = convert_nodes(secondary_nodes)
+    compare_nodes(primary_node_dict, secondary_node_dict, vm_mapping, primarydc, secondarydc, client.verbose)
 
 
 @compare.command()
 @pass_client
 def loadbalancers(client):
     balancers = client.loadbalancer.list_balancers()
-    print("{0}".format(balancers))
+    for balancer in balancers:
+        members = client.loadbalancer.balancer_list_members(balancer)
+        for member in members:
+            print("{0}".format(member.ip))
 
 
 @compare.command()
@@ -141,22 +148,28 @@ def compare_firewall_rules(primary_rules, secondary_rules, verbose=False):
             click.secho("Extra rule {0} found in secondary network domain".format(rule), fg='red', bold=True)
 
 
-def compare_nodes(master, dr, verbose=False):
-    for key in master.keys():
-        ip_split = key.split('.')
-        ip_split[2] = str(int(ip_split[2]) + 16)
-        dr_key = '.'.join(ip_split)
-        if dr_key in dr:
-            print("Found a match Master: {} DR: {}".format(key, dr_key))
-            if node_specs_match(master[key], dr[dr_key], verbose):
+def compare_nodes(master, secondary, vm_mapping, primary_dc, secondary_dc, verbose=False):
+    for node in vm_mapping[primary_dc]:
+        if node not in master:
+            click.secho("Node {0} not found in DC {1}".format(node, primary_dc), fg='red')
+            continue
+        comp_node = vm_mapping[primary_dc][node]['vm']
+        if verbose:
+            click.secho("Node {0} in DC {1} should match Node {2} in DC {3}".format(
+                node, primary_dc, comp_node, secondary_dc
+            ))
+        if comp_node in secondary:
+            if verbose:
+                click.secho("Node {0} exists in DC {1}".format(comp_node, secondary_dc))
+            if node_specs_match(master[node], secondary[comp_node], verbose):
                 click.secho("Node matches", fg='green')
             else:
                 click.secho("Node {} with ip {} does not match {} with ip {}".format(
-                    master[key]['name'], key, dr[dr_key]['name'], key), fg='red')
+                    master[node]['name'], node, secondary[comp_node]['name'], comp_node), fg='red')
 
             click.secho("")
         else:
-            pass
+            click.secho("Could not find node {0} in DC {1}".formaT(comp_node, secondary_dc))
 
 
 def node_specs_match(n1, n2, verbose=False):
