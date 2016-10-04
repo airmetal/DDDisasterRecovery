@@ -76,6 +76,22 @@ def loadbalancers(client):
         for member in members:
             print("{0}".format(member.ip))
 
+@compare.command()
+@click.option('--primaryNetDomain', type=click.UNPROCESSED, required=True, help='First Network Domain')
+@click.option('--primaryLocation', type=click.UNPROCESSED, help='First Network Domain')
+@click.option('--secondaryNetDomain', type=click.UNPROCESSED, required=True, help='Secondary Network Domain')
+@click.option('--secondaryLocation', type=click.UNPROCESSED, help='First Network Domain')
+@pass_client
+def vips_betweeen_net_domains(client, primarynetdomain, primarylocation,
+                              secondarynetdomain, secondarylocation):
+    primary_net_domain_id, secondary_net_domain_id = get_primary_and_secondary_network_ids(
+        client=client, primarynetdomain=primarynetdomain, primarylocation=primarylocation,
+        secondarynetdomain=secondarynetdomain, secondarylocation=secondarylocation)
+    balancers = client.loadbalancer.list_balancers()
+    primary_balancers = filter(lambda x: x.extra['network_domain_id'] == primary_net_domain_id, balancers)
+    secondary_balancers = filter(lambda x: x.extra['network_domain_id'] == secondary_net_domain_id, balancers)
+    compare_balancer_members(primary_balancers, secondary_balancers)
+
 
 @compare.command()
 @click.option('--primaryNetDomain', type=click.UNPROCESSED, required=True, help='First Network Domain')
@@ -85,6 +101,46 @@ def loadbalancers(client):
 @pass_client
 def firewall_rules_between_net_domains(client, primarynetdomain, primarylocation,
                                        secondarynetdomain, secondarylocation):
+    primary_net_domain_id, secondary_net_domain_id = get_primary_and_secondary_network_ids(
+        client=client, primarynetdomain=primarynetdomain, primarylocation=primarylocation,
+        secondarynetdomain=secondarynetdomain, secondarylocation=secondarylocation)
+    net_domain_firewall_rules = client.node.ex_list_firewall_rules(primary_net_domain_id)
+    secondary_net_domain_firewall_rules = client.node.ex_list_firewall_rules(secondary_net_domain_id)
+    net_domain_firewall_rules_dict = convert_firewall_rules(net_domain_firewall_rules)
+    secondary_net_domain_firewall_rules_dict = convert_firewall_rules(secondary_net_domain_firewall_rules)
+    compare_firewall_rules(net_domain_firewall_rules_dict, secondary_net_domain_firewall_rules_dict)
+
+def compare_balancer_members(primary_balancers, secondary_balancers):
+    for primary in primary_balancers:
+        matched = False
+        if len(secondary_balancers) > 0:
+            for secondary in secondary_balancers:
+                if primary.name == secondary.name:  # using the name of the VIP as the primary key
+                    matched = True
+                    primary_members_list = get_ip_port_list(primary.list_members())
+                    secondary_members_list = get_ip_port_list(secondary.list_members())
+                    if primary_members_list == secondary_members_list:
+                        click.secho("VIP {0} and its members match between network domains".format(primary.name),
+                                    fg='green', bold=True)
+                        break
+                    else:
+                        click.secho("VIP {0} members are different between network domains".format(primary.name),
+                                    fg='red', bold=True)
+                        click.secho("Primary VIP {0} members - {1}".format(primary.name, primary_members_list),
+                                    fg='red', bold=True)
+                        click.secho("Secondary VIP {0} members - {1}".format(secondary.name, secondary_members_list),
+                                    fg='red', bold=True)
+                        break
+            if not matched:
+                click.secho("VIP {0} not found in the secondary network".format(primary.name), fg='red', bold=True)
+        else:
+            click.secho("Could not find any VIPs in the second network domain", fg='red', bold=True)
+
+def get_ip_port_list(balancer_members):
+    return sorted([str(member.ip) + ':' + str(member.port) for member in balancer_members])
+
+def get_primary_and_secondary_network_ids(client, primarynetdomain, primarylocation, secondarynetdomain,
+                                          secondarylocation):
     net_domains = client.node.ex_list_network_domains(location=primarylocation)
     filtered_net_domains = filter(lambda x: x.name == primarynetdomain, net_domains)
     if len(filtered_net_domains) > 1:
@@ -97,8 +153,7 @@ def firewall_rules_between_net_domains(client, primarynetdomain, primarylocation
     if not filtered_net_domains:
         click.secho("No network domain found with name {0}".format(primarynetdomain))
         exit(1)
-    net_domain_id = filtered_net_domains[0].id
-    net_domain_firewall_rules = client.node.ex_list_firewall_rules(net_domain_id)
+    primary_net_domain_id = filtered_net_domains[0].id
 
     secondary_net_domains = client.node.ex_list_network_domains(location=secondarylocation)
     filtered_net_domains = filter(lambda x: x.name == secondarynetdomain, secondary_net_domains)
@@ -112,13 +167,8 @@ def firewall_rules_between_net_domains(client, primarynetdomain, primarylocation
     if not filtered_net_domains:
         click.secho("No network domain found with name {0}".format(primarynetdomain))
         exit(1)
-    net_domain_id = filtered_net_domains[0].id
-    secondary_net_domain_firewall_rules = client.node.ex_list_firewall_rules(net_domain_id)
-
-    net_domain_firewall_rules_dict = convert_firewall_rules(net_domain_firewall_rules)
-    secondary_net_domain_firewall_rules_dict = convert_firewall_rules(secondary_net_domain_firewall_rules)
-    compare_firewall_rules(net_domain_firewall_rules_dict, secondary_net_domain_firewall_rules_dict)
-
+    secondary_net_domain_id = filtered_net_domains[0].id
+    return(primary_net_domain_id, secondary_net_domain_id)
 
 def convert_firewall_rules(rules):
     rules_dict = collections.OrderedDict()
